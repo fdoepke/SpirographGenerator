@@ -25,7 +25,7 @@ SwiftUI app for designing spirographs and exporting them as **SVG** or **G-code*
 | Drawing size | Width & height of the exported drawing in mm |
 
 ## Export
-- **SVG** (⌘E): size in mm, one `<path>` per copy (rainbow colours preserved), optional background.
+- **SVG** (⌘E): size in mm, one `<path>` per copy in a `spirograph` group (rainbow / MMU colours preserved), optional background, and an optional **skirt** as a separate `skirt` group in its own colour – traced around the outer contour with exact distances and written as smooth cubic Béziers (the SVG grows to fit it).
 - **G-code** (⇧⌘E) – choose the format from the *Format* popup in the G-code section:
   - **Plain** – minimal G21/G90 + G0/G1. Pen via Z axis or custom commands (e.g. `M3 S30` / `M5` for a GRBL servo or laser). Origin at centre or bottom-left.
   - **CNC (GRBL / LinuxCNC / Mach3)** – `%`-delimited program, `(parenthesis)` comments, `G17 G21 G90 G94` setup, safe-Z retract between paths, plunge feed, optional `N` line numbers, `M30` end.

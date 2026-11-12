@@ -10,7 +10,7 @@ struct ContentView: View {
         let skirtLoops = model.previewSkirtLoops(for: geometry)
         // Zoom out so the skirt fits: extra mm beyond the drawing, converted to geometry units.
         let mmPerUnit = geometry.extent > 0 ? (model.outputSize / 2) / geometry.extent : 1
-        let extraMM = model.showsSkirtInPreview ? model.printLineWidth / 2 + model.skirtExtent : 0
+        let extraMM = model.previewSkirtReach
         let fitExtent = geometry.extent + extraMM / mmPerUnit
 
         HSplitView {
@@ -24,8 +24,10 @@ struct ContentView: View {
                                  physicalWidth: model.gcodeFlavor == .prusa
                                     ? (mm: model.printLineWidth, outputSize: model.outputSize) : nil,
                                  auxLoops: skirtLoops,
-                                 auxBeadMM: model.extrusionPlan.passWidth,
-                                 auxColor: colors.first ?? model.lineColor,
+                                 auxBeadMM: model.previewSkirtBead,
+                                 auxColor: model.svgIncludeSkirt && !(model.gcodeFlavor == .prusa && model.skirtEnabled)
+                                    ? model.skirtColor : (colors.first ?? model.lineColor),
+                                 drawingSizeMM: model.outputSize,
                                  fitExtent: fitExtent)
                 Text("Petals \(geometry.petals)  ·  Turns \(Exporter.num(geometry.turns))  ·  Copies \(count)  ·  \(geometry.pointCount.formatted()) points  ·  \(Exporter.num(model.outputSize)) mm")
                     .font(.caption.monospacedDigit())

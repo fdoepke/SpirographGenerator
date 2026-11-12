@@ -60,6 +60,15 @@ struct ControlsView: View {
                 ParameterSlider("Drawing size (mm)", value: $model.outputSize, range: 10...1000)
                 ParameterSlider("SVG stroke width (mm)", value: $model.svgStroke, range: 0.05...3, step: 0.05)
                 Toggle("Include background in SVG", isOn: $model.svgIncludeBackground)
+                Toggle("Include skirt in SVG", isOn: $model.svgIncludeSkirt)
+                if model.svgIncludeSkirt {
+                    ColorPicker("Skirt colour", selection: $model.skirtColor, supportsOpacity: false)
+                    ParameterSlider("Skirt loops", value: $model.skirtLoops, range: 1...10)
+                    ParameterSlider("Skirt distance from drawing (mm)", value: $model.skirtDistance, range: 0.5...30, step: 0.5)
+                    Text("The skirt is a separate group (id \"skirt\") around the outside of the drawing, drawn with the SVG stroke width. The SVG grows by \(Exporter.num((model.svgSkirtMargin * 10).rounded() / 10)) mm on each side to fit it.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("G-code") {

@@ -7,17 +7,37 @@ enum Exporter {
     // MARK: SVG
 
     static func svg(model: SpirographModel, geometry g: SpirographGeometry) -> String {
-        let size = model.outputSize
+        let drawingSize = model.outputSize
+        let margin = model.svgSkirtMargin                    // extra room for the skirt on each side
+        let size = drawingSize + 2 * margin
         let half = size / 2
-        let scale = g.extent > 0 ? half / g.extent : 1
+        let mmPerUnit = g.extent > 0 ? (drawingSize / 2) / g.extent : 1
+        func sx(_ x: Double) -> String { num(half + x) }
+        func sy(_ y: Double) -> String { num(half - y) }
 
         var out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         out += "<!-- Spirograph Generator: \(model.curveType.rawValue), R=\(model.intFixed) r=\(model.intRolling) d=\(num(model.penOffset)) -->\n"
         out += "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"\(num(size))mm\" height=\"\(num(size))mm\" viewBox=\"0 0 \(num(size)) \(num(size))\">\n"
         if model.svgIncludeBackground {
-            out += "  <rect width=\"100%\" height=\"100%\" fill=\"\(hex(model.backgroundColor))\"/>\n"
+            out += "  <rect id=\"background\" width=\"100%\" height=\"100%\" fill=\"\(hex(model.backgroundColor))\"/>\n"
         }
 
+        // Skirt: a separate group in its own colour, traced on a fine grid and written as smooth Béziers.
+        if model.svgIncludeSkirt {
+            let paths = g.curves.map { $0.map { CGPoint(x: Double($0.x) * mmPerUnit, y: Double($0.y) * mmPerUnit) } }
+            let loops = OutlineLoops.loops(paths: paths, lineWidth: model.svgStroke, gap: model.skirtDistance,
+                                           bead: model.svgStroke, spacing: model.svgStroke,
+                                           count: model.svgSkirtLoopCount, maxGrid: 2000)
+            out += "  <g id=\"skirt\" fill=\"none\" stroke=\"\(hex(model.skirtColor))\" stroke-width=\"\(num(model.svgStroke))\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n"
+            for (i, loop) in loops.enumerated() {
+                let smooth = OutlineLoops.smoothClosed(loop, spacing: 0.2)
+                guard smooth.count > 2 else { continue }
+                out += "    <path id=\"skirt-\(i + 1)\" d=\"\(OutlineLoops.closedBezierPath(smooth, x: sx, y: sy))\"/>\n"
+            }
+            out += "  </g>\n"
+        }
+
+        out += "  <g id=\"spirograph\" fill=\"none\" stroke-width=\"\(num(model.svgStroke))\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n"
         let count = g.curves.count
         for (i, curve) in g.curves.enumerated() {
             guard !curve.isEmpty else { continue }
@@ -25,11 +45,12 @@ enum Exporter {
             d.reserveCapacity(curve.count * 18)
             for (j, p) in curve.enumerated() {
                 d += j == 0 ? "M" : (j == 1 ? " L" : " ")
-                d += "\(num(half + Double(p.x) * scale)) \(num(half - Double(p.y) * scale))"
+                d += "\(sx(Double(p.x) * mmPerUnit)) \(sy(Double(p.y) * mmPerUnit))"
             }
             let stroke = hex(model.color(forCopy: i, of: count))
-            out += "  <path d=\"\(d)\" fill=\"none\" stroke=\"\(stroke)\" stroke-width=\"\(num(model.svgStroke))\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n"
+            out += "    <path id=\"copy-\(i + 1)\" d=\"\(d)\" stroke=\"\(stroke)\"/>\n"
         }
+        out += "  </g>\n"
         out += "</svg>\n"
         return out
     }
@@ -729,8 +750,10 @@ enum Exporter {
 enum OutlineLoops {
 
     /// Returns closed loops, outermost first.
+    /// - Parameter refine: replace the grid distances near each loop with exact distances to the line
+    ///   segments, so contours are accurate to a small fraction of a grid cell (slower; off for previews).
     static func loops(paths: [[CGPoint]], lineWidth: Double, gap: Double, bead: Double,
-                      spacing: Double, count: Int, maxGrid: Int = 1600) -> [[CGPoint]] {
+                      spacing: Double, count: Int, maxGrid: Int = 1600, refine: Bool = true) -> [[CGPoint]] {
         guard count > 0, paths.contains(where: { $0.count > 1 }) else { return [] }
         let half = lineWidth / 2
         let levels = (0..<count).map { gap + bead / 2 + Double($0) * spacing }   // distance from line edge
@@ -806,6 +829,12 @@ enum OutlineLoops {
         // 3. Distance from the line edge, and the outside region via flood fill from the border.
         var field = [Double](repeating: 0, count: nx * ny)
         for idx in 0..<(nx * ny) { field[idx] = d2[idx].squareRoot() * res - half }
+
+        // 3b. Exact distances near the contour levels (the grid EDT is only accurate to ~res/2).
+        if refine {
+            refineNearLevels(&field, paths: paths, levels: levels, half: half,
+                             nx: nx, ny: ny, originX: minX, originY: minY, res: res)
+        }
         var outside = [Bool](repeating: false, count: nx * ny)
         var stack: [Int] = []
         func push(_ i: Int, _ j: Int) {
@@ -832,6 +861,62 @@ enum OutlineLoops {
             }
         }
         return result
+    }
+
+    /// Recomputes `field` (distance from the line edge) exactly for grid points within 2 cells of a level,
+    /// using a bucket grid of the line segments.
+    private static func refineNearLevels(_ field: inout [Double], paths: [[CGPoint]], levels: [Double], half: Double,
+                                         nx: Int, ny: Int, originX: Double, originY: Double, res: Double) {
+        typealias Seg = (ax: Double, ay: Double, dx: Double, dy: Double, len2: Double)
+        var segs: [Seg] = []
+        for path in paths {
+            for (a, b) in zip(path, path.dropFirst()) {
+                let ax = Double(a.x), ay = Double(a.y), dx = Double(b.x) - ax, dy = Double(b.y) - ay
+                segs.append((ax, ay, dx, dy, dx * dx + dy * dy))
+            }
+        }
+        guard !segs.isEmpty, let maxLevel = levels.max() else { return }
+
+        // Bucket grid over the same area as the field.
+        let cell = max(0.5, (maxLevel + half) / 4)
+        let width = Double(nx) * res, height = Double(ny) * res
+        let bw = Int((width / cell).rounded(.up)) + 1, bh = Int((height / cell).rounded(.up)) + 1
+        var buckets = [[Int32]](repeating: [], count: bw * bh)
+        for (k, sg) in segs.enumerated() {
+            let x0 = min(sg.ax, sg.ax + sg.dx) - originX, x1 = max(sg.ax, sg.ax + sg.dx) - originX
+            let y0 = min(sg.ay, sg.ay + sg.dy) - originY, y1 = max(sg.ay, sg.ay + sg.dy) - originY
+            let i0 = max(0, Int(x0 / cell)), i1 = min(bw - 1, Int(x1 / cell))
+            let j0 = max(0, Int(y0 / cell)), j1 = min(bh - 1, Int(y1 / cell))
+            if i0 > i1 || j0 > j1 { continue }
+            for j in j0...j1 { for i in i0...i1 { buckets[j * bw + i].append(Int32(k)) } }
+        }
+
+        let band = 2 * res
+        for j in 0..<ny {
+            for i in 0..<nx {
+                let idx = j * nx + i
+                let v = field[idx]
+                guard levels.contains(where: { abs(v - $0) < band }) else { continue }
+                let px = originX + Double(i) * res, py = originY + Double(j) * res
+                let radius = v + half + 2 * res              // grid estimate + its worst-case error
+                let n = Int((radius / cell).rounded(.up))
+                let ci = Int((px - originX) / cell), cj = Int((py - originY) / cell)
+                var best = Double.infinity
+                for bj in max(0, cj - n)...min(bh - 1, cj + n) {
+                    for bi in max(0, ci - n)...min(bw - 1, ci + n) {
+                        for k in buckets[bj * bw + bi] {
+                            let sg = segs[Int(k)]
+                            var t = sg.len2 > 0 ? ((px - sg.ax) * sg.dx + (py - sg.ay) * sg.dy) / sg.len2 : 0
+                            t = min(max(t, 0), 1)
+                            let ex = px - sg.ax - t * sg.dx, ey = py - sg.ay - t * sg.dy
+                            let d = ex * ex + ey * ey
+                            if d < best { best = d }
+                        }
+                    }
+                }
+                if best.isFinite { field[idx] = best.squareRoot() - half }
+            }
+        }
     }
 
     private static func contours(_ field: [Double], nx: Int, ny: Int, level: Double,
@@ -897,6 +982,78 @@ enum OutlineLoops {
             if edges.count > 3 { loops.append(edges.map(point)) }
         }
         return loops
+    }
+
+    /// Turns a traced (slightly stair-stepped) closed loop into a smooth, evenly sampled one:
+    /// fine uniform resampling, Taubin smoothing (removes grid steps without shrinking the loop),
+    /// then resampling at `spacing` mm. The result is closed (last point == first point).
+    static func smoothClosed(_ loop: [CGPoint], spacing: Double, iterations: Int = 4) -> [CGPoint] {
+        var pts = loop.map { (x: Double($0.x), y: Double($0.y)) }
+        if let f = pts.first, let l = pts.last, hypot(f.x - l.x, f.y - l.y) < 1e-9 { pts.removeLast() }
+        guard pts.count > 3 else { return loop }
+
+        func resample(_ p: [(x: Double, y: Double)], step: Double) -> [(x: Double, y: Double)] {
+            let n = p.count
+            var cum = [0.0]
+            for i in 0..<n {
+                let a = p[i], b = p[(i + 1) % n]
+                cum.append(cum[i] + hypot(b.x - a.x, b.y - a.y))
+            }
+            let total = cum[n]
+            guard total > 0 else { return p }
+            let samples = max(8, Int((total / step).rounded()))
+            var out: [(x: Double, y: Double)] = []
+            out.reserveCapacity(samples)
+            var seg = 0
+            for k in 0..<samples {
+                let s = total * Double(k) / Double(samples)
+                while seg < n - 1 && cum[seg + 1] < s { seg += 1 }
+                let a = p[seg], b = p[(seg + 1) % n]
+                let len = cum[seg + 1] - cum[seg]
+                let t = len > 0 ? (s - cum[seg]) / len : 0
+                out.append((a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
+            }
+            return out
+        }
+
+        // 1. Fine, uniform sampling so smoothing acts evenly.
+        let total = zip(pts, pts.dropFirst() + [pts[0]]).reduce(0.0) { $0 + hypot($1.1.x - $1.0.x, $1.1.y - $1.0.y) }
+        let fine = max(0.02, min(spacing / 4, total / 20000))
+        pts = resample(pts, step: fine)
+
+        // 2. Taubin λ/μ smoothing (cyclic).
+        let n = pts.count
+        var tmp = pts
+        for _ in 0..<iterations {
+            for factor in [0.5, -0.53] {
+                for i in 0..<n {
+                    let a = pts[(i + n - 1) % n], b = pts[(i + 1) % n], p = pts[i]
+                    tmp[i] = (p.x + factor * ((a.x + b.x) / 2 - p.x), p.y + factor * ((a.y + b.y) / 2 - p.y))
+                }
+                pts = tmp
+            }
+        }
+
+        // 3. Output sampling.
+        let out = resample(pts, step: spacing).map { CGPoint(x: $0.x, y: $0.y) }
+        return out + [out[0]]
+    }
+
+    /// SVG path data for a closed loop as smooth cubic Bézier segments (uniform Catmull-Rom).
+    static func closedBezierPath(_ loop: [CGPoint], x: (Double) -> String, y: (Double) -> String) -> String {
+        var p = loop.map { (x: Double($0.x), y: Double($0.y)) }
+        if let f = p.first, let l = p.last, hypot(f.x - l.x, f.y - l.y) < 1e-9 { p.removeLast() }
+        let n = p.count
+        guard n > 2 else { return "" }
+        var d = "M\(x(p[0].x)) \(y(p[0].y))"
+        d.reserveCapacity(n * 48)
+        for i in 0..<n {
+            let p0 = p[(i + n - 1) % n], p1 = p[i], p2 = p[(i + 1) % n], p3 = p[(i + 2) % n]
+            let c1 = (x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6)
+            let c2 = (x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6)
+            d += " C\(x(c1.x)) \(y(c1.y)) \(x(c2.x)) \(y(c2.y)) \(x(p2.x)) \(y(p2.y))"
+        }
+        return d + " Z"
     }
 
     /// Ramer–Douglas–Peucker simplification (keeps the closing point).

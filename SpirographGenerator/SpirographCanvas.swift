@@ -11,6 +11,8 @@ struct SpirographCanvas: View {
     var auxLoops: [[CGPoint]] = []
     var auxBeadMM: Double = 0.45
     var auxColor: Color = .gray
+    /// Width of the drawing in mm (used to draw the skirt at true scale).
+    var drawingSizeMM: Double? = nil
     /// Extent to fit into the view (geometry units); defaults to the drawing itself.
     var fitExtent: Double? = nil
 
@@ -28,8 +30,8 @@ struct SpirographCanvas: View {
 
             // Pixels per millimetre (only meaningful when drawing at true scale).
             var pxPerMM: CGFloat? = nil
-            if let physical = physicalWidth, physical.outputSize > 0 {
-                pxPerMM = scale / CGFloat((physical.outputSize / 2) / geometry.extent)
+            if let sizeMM = physicalWidth?.outputSize ?? drawingSizeMM, sizeMM > 0 {
+                pxPerMM = scale / CGFloat((sizeMM / 2) / geometry.extent)
             }
 
             // Skirt (auxiliary): one stroked path so touching loops form an even, light band.
@@ -46,7 +48,7 @@ struct SpirographCanvas: View {
             }
 
             var strokeWidth = CGFloat(lineWidth)
-            if let physical = physicalWidth, let pxPerMM {
+            if let physical = physicalWidth, let pxPerMM = pxPerMM {
                 strokeWidth = max(0.5, CGFloat(physical.mm) * pxPerMM)
             }
             let style = StrokeStyle(lineWidth: strokeWidth, lineCap: .round, lineJoin: .round)

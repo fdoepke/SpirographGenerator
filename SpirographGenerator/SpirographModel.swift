@@ -304,6 +304,8 @@ final class SpirographModel {
     var outputSize: Double = 150       // mm, width & height of drawing
     var svgStroke: Double = 0.3        // mm
     var svgIncludeBackground = false
+    var svgIncludeSkirt = false
+    var skirtColor: Color = Color(red: 0.55, green: 0.56, blue: 0.62)
     var originCentered = true
 
     // MARK: G-code
@@ -395,21 +397,44 @@ final class SpirographModel {
     }
 
     /// True when the preview should show the skirt.
-    var showsSkirtInPreview: Bool { gcodeFlavor == .prusa && skirtEnabled }
+    /// Number of skirt loops in the SVG.
+    var svgSkirtLoopCount: Int { max(1, Int(skirtLoops.rounded())) }
+    /// Extra space (mm) the SVG needs on each side for the skirt.
+    var svgSkirtMargin: Double {
+        svgIncludeSkirt ? svgStroke / 2 + skirtDistance + Double(svgSkirtLoopCount) * svgStroke + svgStroke : 0
+    }
+
+    /// Skirt shown in the preview: the printed one in Prusa mode, otherwise the SVG one.
+    private var previewSkirtParams: (lineWidth: Double, bead: Double, spacing: Double, count: Int)? {
+        if gcodeFlavor == .prusa && skirtEnabled {
+            return (printLineWidth, extrusionPlan.passWidth, skirtSpacing, skirtLoopCount)
+        }
+        if svgIncludeSkirt { return (svgStroke, svgStroke, svgStroke, svgSkirtLoopCount) }
+        return nil
+    }
+
+    /// True when the preview should show a skirt.
+    var showsSkirtInPreview: Bool { previewSkirtParams != nil }
+    /// Bead width (mm) of the previewed skirt.
+    var previewSkirtBead: Double { previewSkirtParams?.bead ?? 0 }
+    /// How far (mm) the previewed skirt reaches beyond the centre line of the drawing.
+    var previewSkirtReach: Double {
+        guard let p = previewSkirtParams else { return 0 }
+        return p.lineWidth / 2 + skirtDistance + Double(p.count - 1) * p.spacing + p.bead
+    }
 
     /// Skirt loops for the preview, in the same units as `geometry` (coarser grid, cached).
     func previewSkirtLoops(for g: SpirographGeometry) -> [[CGPoint]] {
-        guard showsSkirtInPreview, g.extent > 0 else { return [] }
-        let bead = extrusionPlan.passWidth
+        guard let p = previewSkirtParams, g.extent > 0 else { return [] }
         let key = [curveType.rawValue, "\(intFixed)", "\(intRolling)", "\(penOffset)", "\(g.turns)",
                    "\(resolution)", "\(copyCount)", "\(copyAngle)", "\(rotation)", "\(outputSize)",
-                   "\(printLineWidth)", "\(skirtDistance)", "\(bead)", "\(skirtSpacing)", "\(skirtLoopCount)"]
+                   "\(p.lineWidth)", "\(skirtDistance)", "\(p.bead)", "\(p.spacing)", "\(p.count)"]
             .joined(separator: "|")
         if let cache = skirtPreviewCache, cache.key == key { return cache.loops }
         let mmPerUnit = (outputSize / 2) / g.extent
         let paths = g.curves.map { $0.map { CGPoint(x: Double($0.x) * mmPerUnit, y: Double($0.y) * mmPerUnit) } }
-        let loops = OutlineLoops.loops(paths: paths, lineWidth: printLineWidth, gap: skirtDistance, bead: bead,
-                                       spacing: skirtSpacing, count: skirtLoopCount, maxGrid: 450)
+        let loops = OutlineLoops.loops(paths: paths, lineWidth: p.lineWidth, gap: skirtDistance, bead: p.bead,
+                                       spacing: p.spacing, count: p.count, maxGrid: 450, refine: false)
             .map { $0.map { CGPoint(x: Double($0.x) / mmPerUnit, y: Double($0.y) / mmPerUnit) } }
         skirtPreviewCache = (key: key, loops: loops)
         return loops
@@ -674,6 +699,8 @@ struct ExportSettings: Codable, Equatable {
     var prusaStartGCode: String?
     var prusaEndGCode: String?
     var slotColors: [[Double]]?
+    var svgIncludeSkirt: Bool?
+    var skirtColor: [Double]?
 }
 
 extension SpirographModel {
@@ -728,7 +755,9 @@ extension SpirographModel {
             customStartEnd: customStartEnd,
             prusaStartGCode: prusaStartGCode,
             prusaEndGCode: prusaEndGCode,
-            slotColors: slotColors.map(Self.rgb)
+            slotColors: slotColors.map(Self.rgb),
+            svgIncludeSkirt: svgIncludeSkirt,
+            skirtColor: Self.rgb(skirtColor)
         )
     }
 
@@ -780,6 +809,8 @@ extension SpirographModel {
         if let v = s.customStartEnd { customStartEnd = v }
         if let v = s.prusaStartGCode { prusaStartGCode = v }
         if let v = s.prusaEndGCode { prusaEndGCode = v }
+        if let v = s.svgIncludeSkirt { svgIncludeSkirt = v }
+        if let c = s.skirtColor, c.count >= 3 { skirtColor = Color(.sRGB, red: c[0], green: c[1], blue: c[2]) }
         if let colors = s.slotColors {
             for (i, c) in colors.prefix(slotColors.count).enumerated() where c.count >= 3 {
                 slotColors[i] = Color(.sRGB, red: c[0], green: c[1], blue: c[2])
